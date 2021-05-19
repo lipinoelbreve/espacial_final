@@ -2,11 +2,13 @@ rm(list=ls())
 
 url_estaciones <- 'https://drive.google.com/uc?export=download&id=1UMCF93AaWFn39lxv4zL9B9HOFXUbGw_b'
 url_datos <- 'https://drive.google.com/uc?export=download&id=1uVAhAQK4TdTWb3A0643iAlHlp7_GBSRh'
+url_shapefile_arg <- 'https://drive.google.com/uc?export=download&id=1slJexHZX5qlur_kjrrXWr7roEIVNJnrl'
 
 download.file(url_estaciones, destfile='estaciones_smn.xlsx')
 download.file(url_datos, destfile='datos_meteorologicos.xlsx')
+download.file(url_shapefile_arg, destfile='pais.shp')
 
-# No tengo idea de lo que estoy importando
+# Importo librerías
 library(tidyverse)
 library(readxl)
 library(leaflet)
@@ -15,12 +17,13 @@ library(spdep)
 library(tmap)
 library(viridis)
 library(gstat)
+library(raster)
 
 # Cargo datos
 estaciones <- read_excel('estaciones_smn.xlsx')
 View(estaciones)
 
-# Primer golpe de vista
+# Observaciones en el mapa
 leaflet() %>%
   addTiles() %>%
   addCircleMarkers(data = estaciones,
@@ -28,11 +31,11 @@ leaflet() %>%
                    lng = ~LON,
                    radius=1)
 
-# Varios reportes para mismos puntos
+# Tenemos varios reportes para mismos puntos
 datos_meteorologicos <- read_excel('datos_meteorologicos.xlsx')
 View(datos_meteorologicos)
 
-# Me quedo con temp solo
+# Tomamos solamente la temperatura
 temperatura <- datos_meteorologicos[,c('HORA','TEMP','NOMBRE')]
 View(temperatura)
 
@@ -92,7 +95,6 @@ q_75 <- quantile(estaciones$temp_promedio,
 iqr <- IQR(estaciones$temp_promedio,
            na.rm=TRUE)
 
-
 # Con el criterio de Cuartil_25 - 1.5 IQR eliminaríamos gran parte de la Patagonia
 estaciones[estaciones$temp_promedio <= q_25-1.5*iqr,]
 
@@ -105,6 +107,7 @@ ggplot() +
                  aes(x = temp_promedio),
                  bins = 50)
 
+# No se ven muy normales, pero tampoco están tan mal
 qqnorm(estaciones_filtrado$temp_promedio)
 qqline(estaciones_filtrado$temp_promedio)
 
@@ -123,6 +126,7 @@ plot(estaciones$LON, estaciones$temp_promedio)
 # Con la Longitud no hay una relación muy clara
 
 
+# Ubicamos las observaciones en el mapa, coloreando según temp. promedio
 colores <- colorFactor(palette = 'plasma', estaciones$temp_promedio)
 leaflet() %>%
   addTiles() %>%
@@ -141,9 +145,9 @@ plot(pares_grilla, pares)
 
 pesos_grilla <- nb2listw(pares_grilla, style='W')
 moran.test(estaciones_filtrado$temp_promedio, pesos_grilla)
-# Rechazamos H0 (que los datos no se autocorrelacionan)
+# Rechazamos H0 (que los datos no se autocorrelacionan) --> justifica todo el análisis que estamos haciendo
 
-# Construimos el variograma
+# Construimos el variograma nuve
 data_variograma <- estaciones_filtrado %>% select(LAT, LON, temp_promedio)
 coordinates(data_variograma) <- ~LON + LAT
 
@@ -151,7 +155,7 @@ geodata_variograma <- as.geodata(obj = data_variograma)
 variograma_nube <- variog(geodata_variograma, option='cloud')
 plot(variograma_nube)
 
-# Usamos un cutoff de 25 y un width de 2
+# Usamos un cutoff de 14 y un width de 1
 variograma_empirico <- variogram(temp_promedio~1, data_variograma, cutoff=14, width=1)
 plot(variograma_empirico)
 
@@ -170,10 +174,9 @@ plot(variograma_tendencia , vtent_sph)
 
 attr(vtent_exp, 'SSErr')
 attr(vtent_sph, 'SSErr')
-
 # El exponencial tiene un menor error, por lo que lo elegimos por sobre el esférico
 
-# Isotropía?
+# Hay isotropía?
 variograma_mapa <- variogram(temp_promedio~LAT,
                              data_variograma,
                              cutoff=14,
@@ -182,5 +185,39 @@ variograma_mapa <- variogram(temp_promedio~LAT,
 plot(variograma_mapa)
 
 # No parecería haber grandes diferencias entre variogramas según la dirección
+# Tomamos el proceso como isotrópico (a ojo)
 omni_variograma = plot(variog4(geodata_variograma, uvec = seq(0,15,l=10)))
 
+
+# Para kriging, vamos con la versión Universal
+# El proceso no es estacionario (la media cambia con la latitud)
+min_lon <- min(estaciones$LON)
+max_lon <- max(estaciones$LON)
+min_lat <- min(estaciones$LAT)
+max_lat <- max(estaciones$LAT)
+
+grilla <- expand.grid('LON'=seq(min_lon, max_lon, by=(max_lon-min_lon)/100),
+                      'LAT'=seq(min_lat, max_lat, by=(max_lat-min_lat)/100))
+
+gridded(grilla) = ~LON+LAT
+plot(grilla)
+
+k_universal <- krige(temp_promedio~LAT, data_variograma, grilla, model=vtent_exp, nmax=20)
+spplot(k_universal["var1.pred"],
+       main = "Kriging Universal: Valores Predichos",
+       col.regions=terrain.colors)
+spplot(k_universal["var1.var"],
+       main = "Kriging Universal: Varianza de las Predicciones",
+       col.regions=terrain.colors)
+
+# Cargo el polígono de Argentina para ver el Kriging dentro de los límites
+# A diferencia de hacer una grilla, así podemos interpretar mejor los resultados
+pais <- st_read("pais.shp")
+ggplot() +
+  geom_sf(data = pais)
+
+k_universal
+r <- raster(k_universal,
+            layer = 'var1.pred')
+r.m <- mask(r, pais)
+plot(r.m)
