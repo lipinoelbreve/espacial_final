@@ -3,10 +3,15 @@ rm(list=ls())
 url_estaciones <- 'https://drive.google.com/uc?export=download&id=1UMCF93AaWFn39lxv4zL9B9HOFXUbGw_b'
 url_datos <- 'https://drive.google.com/uc?export=download&id=1uVAhAQK4TdTWb3A0643iAlHlp7_GBSRh'
 url_shapefile_arg <- 'https://drive.google.com/uc?export=download&id=1slJexHZX5qlur_kjrrXWr7roEIVNJnrl'
-
-download.file(url_estaciones, destfile='estaciones_smn.xlsx')
-download.file(url_datos, destfile='datos_meteorologicos.xlsx')
+url_arg_gis <- 'https://drive.google.com/uc?export=download&id=1sKNHyMh89HAZE2Jt24vC6oRbOF-JTugN'
+  
+download.file(url_estaciones, destfile='estaciones_smn.xlsx', mode='wb')
+download.file(url_datos, destfile='datos_meteorologicos.xlsx', mode='wb')
 download.file(url_shapefile_arg, destfile='pais.shp')
+
+temp_shapefile <- tempfile()
+download.file(url_arg_gis, temp_shapefile, mode='wb')
+unzip(temp_shapefile)
 
 # Importo librerías
 library(tidyverse)
@@ -31,6 +36,8 @@ leaflet() %>%
                    lng = ~LON,
                    radius=1)
 
+pais <- st_read("pais.shp")
+
 # Tenemos varios reportes para mismos puntos
 datos_meteorologicos <- read_excel('datos_meteorologicos.xlsx')
 View(datos_meteorologicos)
@@ -41,6 +48,9 @@ View(temperatura)
 
 # Saco NAs en temp
 temperatura <- na.omit(temperatura)
+estaciones[!estaciones$NOMBRE %in% temperatura$NOMBRE,]
+
+# El chilecito no tiene datos
 
 # Guardo estaciones con temperatura
 estaciones <- estaciones[estaciones$NOMBRE %in% temperatura$NOMBRE,]
@@ -77,7 +87,8 @@ for(estacion in nombres_estaciones){
 ggplot() +
   geom_histogram(data = estaciones,
                  aes(x = temp_promedio),
-                 bins = 50)
+                 bins = 50) +
+  labs(x = 'Temperatura Promedio - Grados', y = 'Observaciones', title = 'La distribución es asimétrica')
 
 # La Base Belgrano es un dato algo atípico, con temperatura promedio de -16 grados
 estaciones[estaciones$temp_promedio < -10,]
@@ -98,6 +109,13 @@ iqr <- IQR(estaciones$temp_promedio,
 # Con el criterio de Cuartil_25 - 1.5 IQR eliminaríamos gran parte de la Patagonia
 estaciones[estaciones$temp_promedio <= q_25-1.5*iqr,]
 
+leaflet() %>%
+  addTiles() %>%
+  addCircleMarkers(data = estaciones[estaciones$temp_promedio <= q_25-1.5*iqr,],
+                   lat = ~LAT,
+                   lng = ~LON,
+                   radius=1)
+
 estaciones_filtrado <- estaciones %>%
   filter(temp_promedio > (q_25 - 1.5*iqr),
          temp_promedio < (q_75 + 1.5*iqr))
@@ -108,29 +126,44 @@ ggplot() +
                  bins = 50)
 
 # No se ven muy normales, pero tampoco están tan mal
-qqnorm(estaciones_filtrado$temp_promedio)
+par(mfrow=c(1,2))
+
+qqnorm(estaciones$temp_promedio, main='Antes')
+qqline(estaciones$temp_promedio)
+
+qqnorm(estaciones_filtrado$temp_promedio, main='Después', ylab='')
 qqline(estaciones_filtrado$temp_promedio)
-
-qqnorm((estaciones_filtrado$temp_promedio - mean(estaciones_filtrado$temp_promedio))/sd(estaciones_filtrado$temp_promedio))
-qqline((estaciones_filtrado$temp_promedio - mean(estaciones_filtrado$temp_promedio))/sd(estaciones_filtrado$temp_promedio))
-
-hist((estaciones_filtrado$temp_promedio - mean(estaciones_filtrado$temp_promedio))/sd(estaciones_filtrado$temp_promedio))
+dev.off()
 
 # Previo a realizar el variograma, vemos si la temperatura guarda alguna relación con la ubicación
 # A priori se sospecha que sí (más al Norte --> más cálido el clima)
 
-plot(estaciones$LAT, estaciones$temp_promedio)
-# En efecto, hay una fuerte relación entre la Latitud y la temperatura promedio
+par(mfrow=c(1,2))
 
-plot(estaciones$LON, estaciones$temp_promedio)
+# En efecto, hay una fuerte relación entre la Latitud y la temperatura promedio
+cor_lat = cor(estaciones$LAT, estaciones$temp_promedio)
+cor_lon = cor(estaciones$LON, estaciones$temp_promedio)
+
+plot(estaciones$LAT,
+     estaciones$temp_promedio,
+     ylab='Temperatura Promedio - grados',
+     xlab='Latitud',
+     main = bquote(rho == ~ .(round(cor_lat,3)) ))
+     
 # Con la Longitud no hay una relación muy clara
+plot(estaciones$LON,
+     estaciones$temp_promedio,
+     xlab='Longitud',
+     ylab='',
+     main = bquote(rho == ~ .(round(cor_lon,3)) ))
+dev.off()
 
 
 # Ubicamos las observaciones en el mapa, coloreando según temp. promedio
-colores <- colorFactor(palette = 'plasma', estaciones$temp_promedio)
+colores <- colorFactor(palette = 'plasma', estaciones_filtrado$temp_promedio)
 leaflet() %>%
   addTiles() %>%
-  addCircleMarkers(data = estaciones,
+  addCircleMarkers(data = estaciones_filtrado,
                    lat = ~LAT,
                    lng = ~LON,
                    radius= 1,
@@ -138,22 +171,24 @@ leaflet() %>%
 
 # Autocorrelación Espacial
 # Por puntos
-pares <- estaciones_filtrado %>% select(LON, LAT)
+pares <- estaciones_filtrado %>% dplyr::select(LON, LAT)
 coordinates(pares) <- ~LON + LAT
 pares_grilla <- dnearneigh(pares, 0, 3)
 plot(pares_grilla, pares)
+title('Todos los puntos tienen al menos un vecino')
+
 
 pesos_grilla <- nb2listw(pares_grilla, style='W')
 moran.test(estaciones_filtrado$temp_promedio, pesos_grilla)
 # Rechazamos H0 (que los datos no se autocorrelacionan) --> justifica todo el análisis que estamos haciendo
 
-# Construimos el variograma nuve
-data_variograma <- estaciones_filtrado %>% select(LAT, LON, temp_promedio)
+# Construimos el variograma nube
+data_variograma <- estaciones_filtrado %>% dplyr::select(LAT, LON, temp_promedio)
 coordinates(data_variograma) <- ~LON + LAT
 
 geodata_variograma <- as.geodata(obj = data_variograma)
 variograma_nube <- variog(geodata_variograma, option='cloud')
-plot(variograma_nube)
+plot(variograma_nube, main='La nube sugiere un cutoff de 15')
 
 # Usamos un cutoff de 14 y un width de 1
 variograma_empirico <- variogram(temp_promedio~1, data_variograma, cutoff=14, width=1)
@@ -163,17 +198,37 @@ plot(variograma_empirico)
 variograma_tendencia <- variogram(temp_promedio~LAT, data_variograma, cutoff=14, width=1)
 plot(variograma_tendencia)
 
+variograma_tendencia_2 <- variogram(temp_promedio~LAT+LON, data_variograma, cutoff=14, width=1)
+plot(variograma_tendencia_2)
+
 # Ajustamos modelos esférico y exponencial
+dev.off()
 vtent_exp = fit.variogram(variograma_tendencia, vgm(10, "Exp", 14, 1))
 vtent_exp
+error_exp <- attr(vtent_exp, 'SSErr')
+error_exp
 plot(variograma_tendencia , vtent_exp)
 
 vtent_sph = fit.variogram(variograma_tendencia, vgm(10, "Sph", 14, 1))
 vtent_sph
+error_sph <- attr(vtent_sph, 'SSErr')
+error_sph
 plot(variograma_tendencia , vtent_sph)
 
-attr(vtent_exp, 'SSErr')
-attr(vtent_sph, 'SSErr')
+# Lo mismo para el de LAT + LON
+vtent_exp_2 = fit.variogram(variograma_tendencia_2, vgm(10, "Exp", 14, 1))
+vtent_exp_2
+error_exp <- attr(vtent_exp_2, 'SSErr')
+error_exp
+plot(variograma_tendencia_2 , vtent_exp_2)
+
+vtent_sph_2 = fit.variogram(variograma_tendencia_2, vgm(10, "Sph", 14, 1))
+vtent_sph_2
+error_sph_2 <- attr(vtent_sph_2, 'SSErr')
+error_sph_2
+plot(variograma_tendencia_2 , vtent_sph_2)
+
+
 # El exponencial tiene un menor error, por lo que lo elegimos por sobre el esférico
 
 # Hay isotropía?
@@ -212,12 +267,51 @@ spplot(k_universal["var1.var"],
 
 # Cargo el polígono de Argentina para ver el Kriging dentro de los límites
 # A diferencia de hacer una grilla, así podemos interpretar mejor los resultados
-pais <- st_read("pais.shp")
+
 ggplot() +
   geom_sf(data = pais)
 
-k_universal
 r <- raster(k_universal,
             layer = 'var1.pred')
 r.m <- mask(r, pais)
-plot(r.m)
+plot(r.m, main = 'Kriging Universal')
+
+r <- raster(k_universal,
+            layer = 'var1.var')
+r.m <- mask(r, pais)
+plot(r.m, main = 'Varianza de las predicciones')
+
+
+# Validación cruzada
+k_LAT_exp <- krige.cv(temp_promedio~LAT, data_variograma, vtent_exp, nfold=155)
+k_LAT_sph <- krige.cv(temp_promedio~LAT, data_variograma, vtent_sph, nfold=155)
+k_LAT_LON_exp <- krige.cv(temp_promedio~LAT+LON, data_variograma, vtent_exp_2, nfold=155)
+k_LAT_LON_sph <- krige.cv(temp_promedio~LAT+LON, data_variograma, vtent_sph_2, nfold=155)
+
+bubble(k_LAT_exp, "residual", main = "meuse Model 1")
+bubble(k_LAT_sph, "residual", main = "meuse Model 1")
+bubble(k_LAT_LON_exp, "residual", main = "meuse Model 1")
+bubble(k_LAT_LON_sph, "residual", main = "meuse Model 1")
+
+error_LAT_exp <- mean(k_LAT_exp$residual^2)
+error_LAT_sph <- mean(k_LAT_sph$residual^2)
+error_LAT_LON_exp <- mean(k_LAT_LON_exp$residual^2)
+error_LAT_LON_sph <- mean(k_LAT_LON_sph$residual^2)
+
+dev.off()
+par(mfrow=c(2,2))
+plot(k_LAT_exp$observed, k_LAT_exp$var1.pred,
+     xlab='', ylab='Val. Predichos', main=paste("LAT - Exp. - MSE:", round(error_LAT_exp,2)))
+segments(x0=0,y0=0,x1=45,y1=45)
+
+plot(k_LAT_sph$observed, k_LAT_sph$var1.pred,
+     xlab="", ylab="", main=paste("LAT - Sph. - MSE:", round(error_LAT_sph,2)))
+segments(x0=0,y0=0,x1=45,y1=45)
+
+plot(k_LAT_LON_exp$observed, k_LAT_LON_exp$var1.pred,
+     xlab="Val. Observados", ylab="Val. Predichos", main=paste("LAT + LON - Exp. - MSE:", round(error_LAT_LON_exp,2)))
+segments(x0=0,y0=0,x1=45,y1=45)
+
+plot(k_LAT_LON_sph$observed, k_LAT_LON_sph$var1.pred,
+     xlab="Val. Observados", ylab="", main=paste("LAT + LON - Sph. - MSE:", round(error_LAT_LON_sph,2)))
+segments(x0=0,y0=0,x1=45,y1=45)
